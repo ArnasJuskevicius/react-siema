@@ -13,17 +13,27 @@ class ReactSiema extends Component {
         draggable: PropTypes.bool,
         threshold: PropTypes.number,
         loop: PropTypes.bool,
+        stopOnMouseLeave: PropTypes.bool,
         children: PropTypes.oneOfType([
             PropTypes.element,
             PropTypes.arrayOf(PropTypes.element)
         ]),
-        onInit: PropTypes.func,
-        onChange: PropTypes.func,
+
+        // Fire events after change
+        onAfterChange: PropTypes.func,
     };
 
+    static defaultProps = {
+        stopOnMouseLeave: true,
+    }
+
     events = [
-        'onTouchStart', 'onTouchEnd', 'onTouchMove', 'onMouseDown', 'onMouseUp', 'onMouseLeave', 'onMouseMove', 'onClick'
+        'onTouchStart', 'onTouchEnd', 'onTouchMove', 'onMouseDown', 'onClick'
     ];
+
+    state = {
+        dragged: false,
+    }
 
     constructor(props) {
         super();
@@ -36,9 +46,16 @@ class ReactSiema extends Component {
             draggable: true,
             threshold: 20,
             loop: false,
-            onInit: () => {},
-            onChange: () => {},
         }, props);
+
+        if (props.stopOnMouseLeave) {
+            this.events.push('onMouseLeave')
+            this.events.push('onMouseMove')
+            this.events.push('onMouseUp')
+        } else if (typeof document !== 'undefined') {
+            document.addEventListener('mousemove', this.onMouseMove.bind(this))
+            document.addEventListener('mouseup', this.onMouseUp.bind(this))
+        }
 
         this.events.forEach((handler) => {
             this[handler] = this[handler].bind(this);
@@ -61,15 +78,24 @@ class ReactSiema extends Component {
         if (this.config.draggable) {
             this.pointerDown = false;
             this.drag = {
-                startX: 0,
-                endX: 0,
-                startY: 0,
-                letItGo: null
+                start: 0,
+                end: 0,
             };
         }
     }
 
     componentDidUpdate() {
+        this.config = Object.assign({}, {
+            resizeDebounce: 250,
+            duration: 200,
+            easing: 'ease-out',
+            perPage: 1,
+            startIndex: 0,
+            draggable: true,
+            threshold: 20,
+            loop: false,
+        }, this.props);
+
         this.init();
     }
 
@@ -95,7 +121,6 @@ class ReactSiema extends Component {
         }
 
         this.slideToCurrent();
-        this.config.onInit.call(this);
     }
 
     setSelectorWidth() {
@@ -119,51 +144,67 @@ class ReactSiema extends Component {
         }
     }
 
-    prev(n = 1, callback) {
+    prev() {
         if (this.currentSlide === 0 && this.config.loop) {
             this.currentSlide = this.innerElements.length - this.perPage;
+            if (this.props.onAfterChange) this.props.onAfterChange();
         } else {
-            this.currentSlide = Math.max(this.currentSlide - Number(n), 0);
+            const nextSlide = Math.max(this.currentSlide - 1, 0);
+            const shouldFireEvent = nextSlide !== this.currentSlide && this.props.onAfterChange;
+
+            this.currentSlide = nextSlide;
+
+            // If the next slide isn't the same, then fire the onAfterChange handler
+            if (shouldFireEvent) this.props.onAfterChange();
         }
         this.slideToCurrent();
-        this.config.onChange.call(this);
-        
-        if (typeof callback === 'function') {
-            callback();
-        }
     }
 
-    next(n = 1, callback) {
+    next() {
         if (this.currentSlide === this.innerElements.length - this.perPage && this.config.loop) {
             this.currentSlide = 0;
+            if (this.props.onAfterChange) this.props.onAfterChange();
         } else {
-            this.currentSlide = Math.min(this.currentSlide + Number(n), this.innerElements.length - this.perPage);
+            const nextSlide = Math.min(this.currentSlide + 1, this.innerElements.length - this.perPage);
+            const shouldFireEvent = nextSlide !== this.currentSlide && this.props.onAfterChange;
+
+            this.currentSlide = nextSlide;
+
+            // If the next slide isn't the same, then fire the onAfterChange handler
+            if (shouldFireEvent) this.props.onAfterChange();
         }
         this.slideToCurrent();
-        this.config.onChange.call(this);
-
-        if (typeof callback === 'function') {
-            callback();
-        }
     }
 
     goTo(index) {
         this.currentSlide = Math.min(Math.max(index, 0), this.innerElements.length - 1);
         this.slideToCurrent();
-        this.config.onChange.call(this);
+        if (this.props.onAfterChange) this.props.onAfterChange();
     }
 
     slideToCurrent() {
-        this.sliderFrame.style[transformProperty] = `translate3d(-${Math.round(this.currentSlide * (this.selectorWidth / this.perPage))}px, 0, 0)`;
+        this.sliderFrame.style[transformProperty] = `translate3d(-${this.currentSlide * (this.selectorWidth / this.perPage)}px, 0, 0)`;
+    }
+
+    processMovement(movement, toTheRight) {
+        if (movement < this.config.threshold) {
+            return
+        }
+
+        if (toTheRight) {
+            this.next();
+        } else {
+            this.prev();
+        }
+        // call again untill we are below the threshold
+        return this.processMovement(movement - this.selectorWidth, toTheRight)
     }
 
     updateAfterDrag() {
-        const movement = this.drag.endX - this.drag.startX;
-        if (movement > 0 && Math.abs(movement) > this.config.threshold) {
-            this.prev();
-        } else if (movement < 0 && Math.abs(movement) > this.config.threshold) {
-            this.next();
-        }
+        const movement = this.drag.end - this.drag.start;
+
+        this.processMovement(Math.abs(movement), movement < 0)
+
         this.slideToCurrent();
     }
 
@@ -178,63 +219,99 @@ class ReactSiema extends Component {
 
     clearDrag() {
         this.drag = {
-            startX: 0,
-            endX: 0,
-            startY: 0,
-            letItGo: null
+            start: null,
+            end: null,
         };
     }
 
     setStyle(target, styles) {
+        if (!target || !target.style) { return; }
         Object.keys(styles).forEach((attribute) => {
             target.style[attribute] = styles[attribute];
         });
     }
 
+    getStyle(target, attribute) {
+        return target.style[attribute]
+    }
+
     onTouchStart(e) {
         e.stopPropagation();
         this.pointerDown = true;
-        this.drag.startX = e.touches[0].pageX;
+        this.firstMove = true;
+        this.drag.start = e.touches[0].pageX;
         this.drag.startY = e.touches[0].pageY;
     }
 
     onTouchEnd(e) {
         e.stopPropagation();
         this.pointerDown = false;
+        this.firstMove = true;
         this.setStyle(this.sliderFrame, {
             webkitTransition: `all ${this.config.duration}ms ${this.config.easing}`,
             transition: `all ${this.config.duration}ms ${this.config.easing}`
         });
-        if (this.drag.endX) {
+        if (this.drag.end) {
             this.updateAfterDrag();
         }
         this.clearDrag();
     }
 
     onTouchMove(e) {
-        e.stopPropagation();
+        // ensure swiping with one touch and not pinching
+        if (e.touches.length > 1 || (e.scale && e.scale !== 1)) return;
 
-        if (this.drag.letItGo === null) {
-            this.drag.letItGo = Math.abs(this.drag.startY - e.touches[0].pageY) < Math.abs(this.drag.startX - e.touches[0].pageX);
+        if (this.firstMove) {
+            this.firstMove = false;
+
+            const touches = e.touches[0];
+
+            // measure change in x and y
+            const delta = {
+                x: touches.pageX - this.drag.start,
+                y: touches.pageY - this.drag.startY
+            };
+
+            if (Math.abs(delta.x) < Math.abs(delta.y)) {
+                this.verticalScrolling = true
+                return;
+            }
+            this.verticalScrolling = false
         }
 
-        if (this.pointerDown && this.drag.letItGo) {
-            this.drag.endX = e.touches[0].pageX;
+        if (this.pointerDown && !this.verticalScrolling) {
+            e.preventDefault();
+            this.drag.end = e.touches[0].pageX;
 
             this.setStyle(this.sliderFrame, {
                 webkitTransition: `all 0ms ${this.config.easing}`,
                 transition: `all 0ms ${this.config.easing}`,
-                [transformProperty]: `translate3d(${(this.currentSlide * (this.selectorWidth / this.perPage) + (this.drag.startX - this.drag.endX)) * -1}px, 0, 0)`
+                [transformProperty]: `translate3d(${(this.currentSlide * (this.selectorWidth / this.perPage) + (this.drag.start - this.drag.end)) * -1}px, 0, 0)`
             });
         }
+    }
+
+    onClick(e) {
+        e.preventDefault();
+        e.stopPropagation();
     }
 
     onMouseDown(e) {
         e.preventDefault();
         e.stopPropagation();
+
         this.pointerDown = true;
         this.drag.start = e.pageX;
-        this.wasDragged = false;
+
+        if (!this.props.stopOnMouseLeave) {
+            this.prevCursor = this.getStyle(document.body, 'cursor')
+            this.setStyle(document.body, {
+                cursor: '-webkit-grab',
+            })
+        }
+
+        // At this point it's only a click
+        this.setState({ dragged: false });
     }
 
     onMouseUp(e) {
@@ -245,23 +322,31 @@ class ReactSiema extends Component {
             webkitTransition: `all ${this.config.duration}ms ${this.config.easing}`,
             transition: `all ${this.config.duration}ms ${this.config.easing}`
         });
-        if (this.drag.end) {
-           // If drag.end has a value > 0, the slider has been dragged
-           this.wasDragged = true;
-           this.updateAfterDrag();
+
+        if (!this.props.stopOnMouseLeave) {
+            this.setStyle(document.body, {
+                cursor: this.prevCursor,
+            })
         }
+
+        // If drag.end has a value, the slider has been dragged, update
+        // state accordingly
+        if (this.drag.end !== null) {
+            this.updateAfterDrag();
+            this.setState({ dragged: true });
+        }
+
         this.clearDrag();
     }
 
     onMouseMove(e) {
-        e.preventDefault();
         if (this.pointerDown) {
-            this.drag.endX = e.pageX;
+            this.drag.end = e.pageX;
             this.setStyle(this.sliderFrame, {
                 cursor: '-webkit-grabbing',
                 webkitTransition: `all 0ms ${this.config.easing}`,
                 transition: `all 0ms ${this.config.easing}`,
-                [transformProperty]: `translate3d(${(this.currentSlide * (this.selectorWidth / this.perPage) + (this.drag.startX - this.drag.endX)) * -1}px, 0, 0)`
+                [transformProperty]: `translate3d(${(this.currentSlide * (this.selectorWidth / this.perPage) + (this.drag.start - this.drag.end)) * -1}px, 0, 0)`
             });
         }
     }
@@ -269,7 +354,7 @@ class ReactSiema extends Component {
     onMouseLeave(e) {
         if (this.pointerDown) {
             this.pointerDown = false;
-            this.drag.endX = e.pageX;
+            this.drag.end = e.pageX;
             this.setStyle(this.sliderFrame, {
                 cursor: '-webkit-grab',
                 webkitTransition: `all ${this.config.duration}ms ${this.config.easing}`,
@@ -280,26 +365,20 @@ class ReactSiema extends Component {
         }
     }
 
-    onClick(e) {
-        if (!this.wasDragged && this.props.onClick) {
-            this.props.onClick(e);
-        }
-    }
-
     render() {
         return (
             <div
                 ref={(selector) => this.selector = selector}
                 style={{ overflow: 'hidden' }}
-                {...this.events.reduce((props, event) => Object.assign({}, props, { [event]: this[event] }), {})}
-            >
+                {...this.events.reduce((props, event) => Object.assign({}, props, { [event]: this[event] }), {})}>
                 <div ref={(sliderFrame) => this.sliderFrame = sliderFrame}>
-                    {React.Children.map(this.props.children, (children, index) =>
-                        React.cloneElement(children, {
+                    {React.Children.map(this.props.children, (children, index) => {
+                        return React.cloneElement(children, {
                             key: index,
                             style: { float: 'left' },
-                            onClick: this.onClick,
+                            isClick: !this.state.dragged,
                         })
+                    }
                     )}
                 </div>
             </div>
